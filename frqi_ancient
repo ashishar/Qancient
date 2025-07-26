@@ -1,0 +1,87 @@
+import numpy as np
+from PIL import Image
+from qiskit import QuantumCircuit
+import matplotlib.pyplot as plt
+
+
+def preprocess_image(image_path):
+    """
+    Load an image, convert to grayscale, resize to 32×32,
+    flatten, and map pixel intensities [0,255] → angles [0, π/2].
+    """
+    img = Image.open(image_path).convert("L").resize((32, 32))
+    pixels = np.array(img, dtype=float).flatten()
+    return (pixels / 255.0) * (np.pi / 2)
+
+def multiplex_ry_pruned(qc, angles, controls, target, tol=1e-2):
+    """
+    Uniformly‑controlled RY with branch pruning:
+      - If all angles in this block differ by < tol, apply one RY of their mean.
+      - Else, recurse via binary‑tree decomposition.
+    """
+    # Base case: no controls
+    if not controls:
+        qc.ry(2 * angles[0], target)
+        return
+
+    # Prune if subtree nearly constant
+    if np.max(angles) - np.min(angles) < tol:
+        avg = float(np.mean(angles))
+        qc.ry(2 * avg, target)
+        return
+
+    # Otherwise split and recurse
+    highest = controls[-1]
+    rest    = controls[:-1]
+    half    = len(angles) // 2
+    angles0, angles1 = angles[:half], angles[half:]
+
+    # U0 on rest
+    multiplex_ry_pruned(qc, angles0, rest, target, tol)
+
+    # Entangle highest
+    qc.cx(highest, target)
+
+    # U1·U0† on rest
+    diff = [a1 - a0 for a0, a1 in zip(angles0, angles1)]
+    multiplex_ry_pruned(qc, diff, rest, target, tol)
+
+    # Disentangle
+    qc.cx(highest, target)
+
+def frqi_encode(qc, angles, tol=1e-2):
+    """
+    Builds the FRQI encoding circuit on `qc`:
+      - 1 colour qubit (wire 0)
+      - 10 position qubits (wires 1–10)
+      - A single pruned multiplexed RY
+    """
+    # Define qubit indices
+    n_pos     = 5
+    colour    = 0
+    pos_qubits = list(range(1, 1 + 2 * n_pos))
+
+    # 1) Uniform superposition on position qubits
+    for q in pos_qubits:
+        qc.h(q)
+
+    # 2) One pruned multiplexed RY on the colour qubit
+    multiplex_ry_pruned(qc, angles, pos_qubits, colour, tol)
+
+
+
+# ---------------- Example Usage ----------------
+# 1) Preprocess
+angles = preprocess_image("sample_data/1.jpg")
+
+# 2) Build circuit
+qc = QuantumCircuit(1 + 2*5)  # 11 qubits total
+frqi_encode(qc, angles)
+
+# 3) Inspect
+print("Qubits:", qc.num_qubits)
+print("Depth :", qc.depth())
+
+# Optionally draw
+qc.draw(output="mpl", fold=100)
+
